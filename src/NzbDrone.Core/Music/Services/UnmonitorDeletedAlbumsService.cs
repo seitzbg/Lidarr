@@ -98,7 +98,10 @@ namespace NzbDrone.Core.Music
 
                     if (gone)
                     {
-                        dropped.Folders[file.Path.GetParentPath()] = false;
+                        dropped.Folders.Add(file.Path.GetParentPath());
+
+                        // They may have gone to a root folder scanned before, so every one has to be scanned again.
+                        dropped.ScannedRootFolders.Clear();
                     }
                     else
                     {
@@ -119,8 +122,10 @@ namespace NzbDrone.Core.Music
 
             var trackFile = message.TrackFile;
 
-            // Lidarr deletes a file from disk before it drops it from the database, so one still on disk was not deleted.
-            if (message.Reason == DeleteMediaFileReason.Manual && !_diskProvider.FileExists(trackFile.Path))
+            // Lidarr deletes a file from disk before it drops it from the database, and drops one it cannot reach without
+            // deleting it, so only a file gone from disk was deleted.
+            if (message.Reason == DeleteMediaFileReason.Manual &&
+                IsGoneFromDisk(trackFile.Path, _rootFolderService.GetBestRootFolder(trackFile.Path)?.Path, new Dictionary<string, HashSet<string>>(PathEqualityComparer.Instance)))
             {
                 lock (_missingFromDisk)
                 {
@@ -145,6 +150,10 @@ namespace NzbDrone.Core.Music
                 return;
             }
 
+            // Files can move to any root folder, and a scan of it imports them again, so an album is decided once all have
+            // been scanned. A root folder that is not there holds nothing to import, unless the files were in it.
+            var rootFolders = _rootFolderService.All().Select(r => (r.Path, Exists: _diskProvider.FolderExists(r.Path))).ToList();
+
             // Files the scan matched to an album but did not import, such as files moved to where they no longer match
             // well enough, may still be that album's. Later scans skip them while they are unchanged, so this one decides.
             List<int> albumIds;
@@ -154,14 +163,12 @@ namespace NzbDrone.Core.Music
                 // Root folders are often scanned one at a time, so what each scan covered counts until the rest is covered.
                 foreach (var dropped in _missingFromDisk.Values)
                 {
-                    foreach (var folder in dropped.Folders.Keys.Where(folder => message.RootFolders.Any(root => root.PathEquals(folder) || root.IsParentPath(folder))).ToList())
-                    {
-                        dropped.Folders[folder] = true;
-                    }
+                    dropped.ScannedRootFolders.UnionWith(message.RootFolders);
                 }
 
                 albumIds = _missingFromDisk
-                    .Where(x => message.MatchedAlbumIds.Contains(x.Key) || x.Value.Folders.Values.All(scanned => scanned))
+                    .Where(x => message.MatchedAlbumIds.Contains(x.Key) ||
+                                rootFolders.All(r => x.Value.ScannedRootFolders.Contains(r.Path) || (!r.Exists && !x.Value.IsIn(r.Path))))
                     .Select(x => x.Key)
                     .ToList();
             }
@@ -216,7 +223,7 @@ namespace NzbDrone.Core.Music
 
             lock (_missingFromDisk)
             {
-                foreach (var albumId in _missingFromDisk.Where(x => x.Value.Folders.Keys.Any(folder => rootFolder.PathEquals(folder) || rootFolder.IsParentPath(folder))).Select(x => x.Key).ToList())
+                foreach (var albumId in _missingFromDisk.Where(x => x.Value.IsIn(rootFolder)).Select(x => x.Key).ToList())
                 {
                     _missingFromDisk.Remove(albumId);
                 }
@@ -238,7 +245,7 @@ namespace NzbDrone.Core.Music
             while (!_diskProvider.FolderExists(folder))
             {
                 // Not even the root folder is there, such as storage gone offline.
-                if (folder.PathEquals(rootFolder) || !rootFolder.IsParentPath(folder))
+                if (rootFolder == null || folder.PathEquals(rootFolder) || !rootFolder.IsParentPath(folder))
                 {
                     return false;
                 }
@@ -290,13 +297,19 @@ namespace NzbDrone.Core.Music
 
         private class DroppedFiles
         {
-            // Folders that held its files found gone from disk, and whether a scan of the whole root folder each is in has
-            // completed since. A scan can import the files again from anywhere in their root folder, so the album is only
-            // decided once all its folders have been covered.
-            public Dictionary<string, bool> Folders { get; } = new Dictionary<string, bool>(PathEqualityComparer.Instance);
+            // Folders that held its files found gone from disk.
+            public HashSet<string> Folders { get; } = new HashSet<string>(PathEqualityComparer.Instance);
+
+            // Root folders scanned in full since its files were last found gone.
+            public HashSet<string> ScannedRootFolders { get; } = new HashSet<string>(PathEqualityComparer.Instance);
 
             // Whether any of its files were still on disk, or out of reach, such as in folders scans skip like Extras.
             public bool StillOnDisk { get; set; }
+
+            public bool IsIn(string rootFolder)
+            {
+                return Folders.Any(folder => rootFolder.PathEquals(folder) || rootFolder.IsParentPath(folder));
+            }
         }
     }
 }

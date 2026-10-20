@@ -102,6 +102,14 @@ namespace NzbDrone.Core.Test.MusicTests
                 .Returns(empty);
         }
 
+        private RootFolder GivenOtherRootFolder()
+        {
+            return Db.Insert(Builder<RootFolder>.CreateNew()
+                .With(r => r.Id = 0)
+                .With(r => r.Path = _otherRootFolderPath)
+                .Build());
+        }
+
         private void GivenFilesStillOnDisk()
         {
             Mocker.GetMock<IDiskProvider>()
@@ -325,6 +333,21 @@ namespace NzbDrone.Core.Test.MusicTests
             IsMonitored(album).Should().BeTrue();
         }
 
+        [TestCase(false, false)]
+        [TestCase(true, false)]
+        [TestCase(false, true)]
+        [TestCase(true, true)]
+        public void should_keep_album_monitored_when_its_files_are_deleted_in_lidarr_while_out_of_reach(bool artistFolder, bool listable)
+        {
+            // Lidarr drops a file it cannot reach from the database without deleting it.
+            var (album, _, files) = GivenMonitoredAlbumWithFiles();
+            GivenFolderOutOfReach(files, artistFolder, listable);
+
+            DeleteFiles(files, DeleteMediaFileReason.Manual);
+
+            IsMonitored(album).Should().BeTrue();
+        }
+
         [TestCase(false)]
         [TestCase(true)]
         public void should_keep_album_monitored_when_its_root_folder_is_removed(bool reachable)
@@ -424,10 +447,7 @@ namespace NzbDrone.Core.Test.MusicTests
         public void should_unmonitor_album_missing_from_two_root_folders_once_each_has_been_scanned_in_full()
         {
             // The folder watcher scans only the root folders it saw changes in, and adding a root folder only that one.
-            Db.Insert(Builder<RootFolder>.CreateNew()
-                .With(r => r.Id = 0)
-                .With(r => r.Path = _otherRootFolderPath)
-                .Build());
+            GivenOtherRootFolder();
             var (album, _, files) = GivenMonitoredAlbumWithFiles();
             files[1].Path = Path.Combine(_otherRootFolderPath, "Artist", "Album", Path.GetFileName(files[1].Path));
             Db.Update(files[1]);
@@ -439,6 +459,67 @@ namespace NzbDrone.Core.Test.MusicTests
 
             CompleteScanOf(_otherRootFolderPath);
             IsMonitored(album).Should().BeFalse();
+        }
+
+        [Test]
+        public void should_keep_album_monitored_until_every_root_folder_has_been_scanned_in_full()
+        {
+            // Files moved to another root folder are imported again by a scan of that one.
+            GivenOtherRootFolder();
+            var (album, _, files) = GivenMonitoredAlbumWithFiles();
+
+            DeleteFiles(files, DeleteMediaFileReason.MissingFromDisk);
+
+            CompleteScanOf(_rootFolderPath);
+            IsMonitored(album).Should().BeTrue();
+            HoldsBackRssReleases(album).Should().BeTrue();
+
+            CompleteScanOf(_otherRootFolderPath);
+            IsMonitored(album).Should().BeFalse();
+        }
+
+        [Test]
+        public void should_wait_for_a_scan_of_a_root_folder_scanned_before_the_files_went_missing()
+        {
+            // The files may have moved there after that scan.
+            GivenOtherRootFolder();
+            var (album, _, files) = GivenMonitoredAlbumWithFiles();
+
+            DeleteFiles(files.Take(1).ToList(), DeleteMediaFileReason.MissingFromDisk);
+            CompleteScanOf(_otherRootFolderPath);
+            DeleteFiles(files.Skip(1).ToList(), DeleteMediaFileReason.MissingFromDisk);
+            CompleteScanOf(_rootFolderPath);
+
+            IsMonitored(album).Should().BeTrue();
+        }
+
+        [Test]
+        public void should_not_wait_for_a_scan_of_a_root_folder_that_is_not_there()
+        {
+            // A scan stops at a root folder that is missing, which holds nothing to import.
+            GivenOtherRootFolder();
+            Mocker.GetMock<IDiskProvider>().Setup(s => s.FolderExists(_otherRootFolderPath)).Returns(false);
+            var (album, _, files) = GivenMonitoredAlbumWithFiles();
+
+            DeleteFiles(files, DeleteMediaFileReason.MissingFromDisk);
+            CompleteScanOf(_rootFolderPath);
+
+            IsMonitored(album).Should().BeFalse();
+        }
+
+        [Test]
+        public void should_keep_album_monitored_while_the_root_folder_its_files_were_in_is_not_there()
+        {
+            // A scan of only the artist folder found the files missing, then their root folder went offline, where they
+            // may still be elsewhere.
+            GivenOtherRootFolder();
+            var (album, _, files) = GivenMonitoredAlbumWithFiles();
+
+            DeleteFiles(files, DeleteMediaFileReason.MissingFromDisk);
+            Mocker.GetMock<IDiskProvider>().Setup(s => s.FolderExists(_rootFolderPath)).Returns(false);
+            CompleteScanOf(_otherRootFolderPath);
+
+            IsMonitored(album).Should().BeTrue();
         }
 
         [Test]
@@ -769,10 +850,7 @@ namespace NzbDrone.Core.Test.MusicTests
         [Test]
         public void should_keep_holding_back_rss_releases_when_another_root_folder_is_removed()
         {
-            var otherRootFolder = Db.Insert(Builder<RootFolder>.CreateNew()
-                .With(r => r.Id = 0)
-                .With(r => r.Path = _otherRootFolderPath)
-                .Build());
+            var otherRootFolder = GivenOtherRootFolder();
             var (album, _, files) = GivenMonitoredAlbumWithFiles();
 
             DeleteFiles(files, DeleteMediaFileReason.MissingFromDisk);

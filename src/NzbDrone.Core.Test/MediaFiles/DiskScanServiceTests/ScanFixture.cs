@@ -603,6 +603,25 @@ namespace NzbDrone.Core.Test.MediaFiles.DiskScanServiceTests
         }
 
         [Test]
+        public void should_report_a_root_folder_without_audio_files_as_scanned_in_full()
+        {
+            // It holds nothing to import, such as files moved there from another root folder.
+            GivenArtistFolder();
+            GivenFiles(new List<string>());
+
+            DiskScanCompletedEvent completed = null;
+
+            Mocker.GetMock<IEventAggregator>()
+                .Setup(s => s.PublishEvent(It.IsAny<DiskScanCompletedEvent>()))
+                .Callback<DiskScanCompletedEvent>(e => completed = e);
+
+            Subject.Scan(new List<string> { _rootFolder });
+
+            completed.RootFolders.Should().Equal(_rootFolder);
+            ExceptionVerification.ExpectedWarns(1);
+        }
+
+        [Test]
         public void should_not_report_the_root_folder_of_an_artist_folder_it_scanned()
         {
             GivenArtistFolder();
@@ -679,9 +698,9 @@ namespace NzbDrone.Core.Test.MediaFiles.DiskScanServiceTests
                 .Setup(s => s.PublishEvent(It.IsAny<DiskScanCompletedEvent>()))
                 .Callback<DiskScanCompletedEvent>(e => completed = e);
 
-            // As when the database is locked.
+            // As when the database is locked, while recording the file it did not import.
             Mocker.GetMock<IMediaFileService>()
-                .Setup(s => s.Update(It.IsAny<List<TrackFile>>()))
+                .Setup(s => s.AddMany(It.IsAny<List<TrackFile>>()))
                 .Throws(new InvalidOperationException("database is locked"));
 
             Assert.Throws<InvalidOperationException>(() => Subject.Scan(new List<string> { _artist.Path }));

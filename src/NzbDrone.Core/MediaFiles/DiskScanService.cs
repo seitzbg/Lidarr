@@ -133,6 +133,12 @@ namespace NzbDrone.Core.MediaFiles
 
                 var files = FilterFiles(folder, GetAudioFiles(folder));
 
+                // Also when it holds no audio files: it then holds nothing a scan could import.
+                if (folder.PathEquals(rootFolder.Path))
+                {
+                    scannedRootFolders.Add(rootFolder.Path);
+                }
+
                 if (!files.Any())
                 {
                     _logger.Warn("Scan folder {0} is empty.", folder);
@@ -141,11 +147,6 @@ namespace NzbDrone.Core.MediaFiles
 
                 CleanMediaFiles(folder, files.Select(x => x.FullName).ToList());
                 mediaFileList.AddRange(files);
-
-                if (folder.PathEquals(rootFolder.Path))
-                {
-                    scannedRootFolders.Add(rootFolder.Path);
-                }
             }
 
             var artists = _artistService.GetArtists(artistIds);
